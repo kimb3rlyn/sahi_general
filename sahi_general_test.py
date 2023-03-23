@@ -5,7 +5,7 @@ from time import perf_counter
 import cv2
 import torch
 
-from sahi_general import SahiGeneral
+from script.sahi_general import SahiGeneral
 from yolov7.yolov7 import YOLOv7
 
 
@@ -18,8 +18,10 @@ Path(output_folder).mkdir(parents=True, exist_ok=True)
 
 
 yolov7 = YOLOv7(
-    weights='yolov7_state.pt',
-    cfg='./yolov7.yaml',
+    weights = './yolov7-e6-visdrone-blackout-save-state.pt',
+    cfg = './yolov7-e6-visdrone.yaml',
+    # weights='yolov7_state.pt',
+    # cfg='./yolov7.yaml',
     bgr=True,
     gpu_device=0,
     model_image_size=640,
