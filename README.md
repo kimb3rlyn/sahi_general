@@ -34,3 +34,5 @@
             list of detections for each frame with keys: label, confidence, t, l, b, r, w, h
             
 
+## Usage 
+- Refer to ```sahi_general_test.py``` for example usage 
