@@ -69,6 +69,7 @@ darknet53.conv.74
 yolov3-tiny.conv.15
 *.ptl
 *.trt
+*.yaml
 
 # GitHub Python GitIgnore ----------------------------------------------------------------------------------------------
 # Byte-compiled / optimized / DLL files
