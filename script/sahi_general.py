@@ -1,18 +1,14 @@
 import logging
-import sys
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import List, Tuple
 
 import torch
 import numpy as np
 
 from sahi.slicing import slice_image
-from sahi.annotation import BoundingBox
 from sahi.predict import POSTPROCESS_NAME_TO_CLASS
 from sahi.prediction import ObjectPrediction
-from sahi.utils.import_utils import check_requirements, is_available
-from sahi.utils.torch import is_torch_cuda_available
 from sahi.utils.compatibility import fix_full_shape_list, fix_shift_amount_list
 
 logger = logging.getLogger(__name__)
@@ -22,22 +18,6 @@ BoundingBoxType = Tuple[float, float, float, float]
 
 """Detection: Tuple[LTRB bounding box, Detection confidence, Detection class name]"""
 DetectionType = Tuple[BoundingBoxType, float, str]
-
-def batch(iterable, bs=1):
-    """Yields iterable in batches of size bs"""
-    l = len(iterable)
-    for ndx in range(0, l, bs):
-        yield iterable[ndx: min(ndx + bs, l)]
-
-def xywh2xyxy(x):
-    # Convert nx4 boxes from [x, y, w, h] to [x1, y1, x2, y2] where xy1=top-left, xy2=bottom-right
-    y = x.clone() if isinstance(x, torch.Tensor) else np.copy(x)
-    y[:, 0] = x[:, 0] - x[:, 2] / 2  # top left x
-    y[:, 1] = x[:, 1] - x[:, 3] / 2  # top left y
-    y[:, 2] = x[:, 0] + x[:, 2] / 2  # bottom right x
-    y[:, 3] = x[:, 1] + x[:, 3] / 2  # bottom right y
-    return 
-
 
 class DetectionModel(ABC):
     @abstractmethod
@@ -49,60 +29,42 @@ class DetectionModel(ABC):
 class SahiGeneral(DetectionModel):
     """
     Args:
-        model : 
-            any model 
-        image_size: int
-            Inference input size.
-        bgr : bool 
-            If True, images are in BGR. Defaulted to False
-        batch_size : int 
-            Batch size of the  model 
-        trace :
-            If True, model is trace. Defaulted to False
-        flip_channels :
-            If True, flip_channels is applied. Defaulted to True
-
-        sahi_image_height_threshold: int 
-            If image exceed this height, sahi will be performed on it. 
+        model :
+            any model
+        sahi_image_height_threshold: int
+            If image exceed this height, sahi will be performed on it.
             Defaulted to 900
         sahi_image_width_threshold: int
-            If image exceed this width, sahi will be performed on it. 
+            If image exceed this width, sahi will be performed on it.
             Defaulted to 900
-        sahi_slice_height: int 
-            Sliced image height. 
+        sahi_slice_height: int
+            Sliced image height.
             Defaulted to 512
         sahi_slice_width: int
-            Sliced image width. 
+            Sliced image width.
             Defaulted to 512
-        sahi_overlap_height_ratio: float 
+        sahi_overlap_height_ratio: float
             Fractional overlap in height of each window (e.g. an overlap of 0.2 for a window of size 512 yields an overlap of 102 pixels).
             Default to '0.2'.
-        sahi_overlap_width_ratio: float 
+        sahi_overlap_width_ratio: float
             Fractional overlap in width of each window (e.g. an overlap of 0.2 for a window of size 512 yields an overlap of 102 pixels).
             Default to '0.2'.
         sahi_postprocess_type: str
             Type of the postprocess to be used after sliced inference while merging/eliminating predictions.
             Options are 'NMM', 'GRREDYNMM' or 'NMS'. Default is 'GRREDYNMM'.
             Defaulted to "GREEDYNMM"
-        sahi_postprocess_match_metric: str 
+        sahi_postprocess_match_metric: str
             Metric to be used during object prediction matching after sliced prediction.
             'IOU' for intersection over union, 'IOS' for intersection over smaller area.
-            Defaulted to "IOU"
+            Defaulted to "IOS"
         sahi_postprocess_match_threshold: float
-            Sliced predictions having higher iou than postprocess_match_threshold will be postprocessed after sliced prediction.
+            Sliced predictions having higher iou/ios than postprocess_match_threshold will be postprocessed after sliced prediction.
             Defaulted to 0.5
-        sahi_postprocess_class_agnostic: bool 
+        sahi_postprocess_class_agnostic: bool
             If True, postprocess will ignore category ids.
             Defaulted to True
     """
     model: object = None
-    image_size: Optional[int] = 1920  # multiple of 64
-    bgr: bool = True
-    batch_size: int = 1
-    trace: bool = False
-    half: Optional[bool] = None
-    flip_channels: bool = True
-
     sahi_image_height_threshold: int = 900
     sahi_image_width_threshold: int = 900
     sahi_slice_height: int = 512
@@ -134,10 +96,11 @@ class SahiGeneral(DetectionModel):
         print('SAHI detection warmed up')
 
     @torch.no_grad()
-    def detect(self, list_of_imgs: List[np.ndarray]) -> List[List[DetectionType]]:
+    def detect(self, list_of_imgs: List[np.ndarray], classes=None) -> List[List[DetectionType]]:
         """
         Args:
             list of images (np.ndarray): an image of shape (H, W, C) (in BGR order).
+            classes (List[str]) : classes to focus on (optional).
         Returns:
             predictions (dict): the output of the model
         """
@@ -158,37 +121,37 @@ class SahiGeneral(DetectionModel):
         # SAHI detection
         list_sahi_detection_results = []
         for sahi_img in list_of_sahi_imgs:
-            # send to inference each of sahi images in a batch
-            sahi_detection_results = self._detect_sahi(sahi_img)
+            # send to inference each of sahi images
+            sahi_detection_results = self._detect_sahi(sahi_img, classes)
             list_sahi_detection_results.append(sahi_detection_results)
 
-        # Normal detection
-        detection_results = []
-        if len(list_of_non_sahi_imgs) > 0:
-            predictions = self.model.get_detections_dict(list_of_imgs)[0]
-            detection_results = predictions
+        # Non-SAHI detection
+        detection_results = self.model.get_detections_dict(list_of_non_sahi_imgs, classes=classes)
+        if detection_results is None:
+            detection_results = [[]]
 
-        # merge sahi det results  with original list result
+        # merge sahi det results with original list result
         exit_counter = 0
         for i, idx in enumerate(list_of_sahi_idx):
             img_result_list = []
             for sahi_slice_result in list_sahi_detection_results[i]:
                 if len(sahi_slice_result) > 0:
                     for obj_det in sahi_slice_result:
-                        ltrb = [
-                            obj_det.bbox.minx,
-                            obj_det.bbox.miny,
-                            obj_det.bbox.maxx,
-                            obj_det.bbox.maxy,
-                        ]
+                        l = obj_det.bbox.minx
+                        t = obj_det.bbox.miny
+                        r = obj_det.bbox.maxx
+                        b = obj_det.bbox.maxy
+                        w = r - l
+                        h = b - t
                         score = obj_det.score.value
                         class_name = obj_det.category.name
-                        img_result_list.append([ltrb, score, class_name])
+                        result = {'label': class_name, 'confidence': score, 't': t, 'l': l, 'b': b, 'r': r, 'w': w, 'h': h}
+                        img_result_list.append(result)
             detection_results.insert(idx, img_result_list)
         return detection_results
 
     @torch.no_grad()
-    def _detect_sahi(self, img):
+    def _detect_sahi(self, img, classes):
 
         slice_image_result = slice_image(
             image=img,
@@ -215,27 +178,45 @@ class SahiGeneral(DetectionModel):
             full_shape_list.append(
                 [slice_image_result.original_image_height, slice_image_result.original_image_width])
 
-        # prepare batches
-        original_predictions = []
-        batches = batch(list_of_imgs, bs=self.batch_size)
-        for b in batches:
-            # predict each batch
-            original_preds = self.model.get_detections_dict(b)[0]
-            original_predictions.extend([original_preds])
+        original_detection_results = self.model.get_detections_dict([img], classes=classes)[0]
+
+        object_prediction_list = []
+        for prediction in original_detection_results:
+            x1 = int(prediction['l'])
+            y1 = int(prediction['t'])
+            x2 = int(prediction['r'])
+            y2 = int(prediction['b'])
+            bbox = [x1, y1, x2, y2]
+            score = prediction['confidence']
+            category_name = prediction['label']
+
+            # ignore invalid predictions
+            if not (bbox[0] < bbox[2]) or not (bbox[1] < bbox[3]):
+                logger.warning(
+                    f"ignoring invalid prediction with bbox: {bbox}")
+                continue
+            object_prediction = ObjectPrediction(
+                bbox=bbox,
+                score=score,
+                category_id = self.model.classname_to_idx(category_name),
+                bool_mask=None,
+                category_name=category_name,
+                shift_amount=[0, 0],
+                full_shape=None,
+            )
+            object_prediction_list.append(object_prediction)
+
+        original_predictions = self.model.get_detections_dict(list_of_imgs, classes=classes)
   
         shift_amount_list = fix_shift_amount_list(shift_amount_list)
         full_shape_list = fix_full_shape_list(full_shape_list)
-        object_prediction_list = []
 
-
-        # needed format for original_predictions is xyxy score classid
-        for image_ind, image_predictions_in_xyxy_format in enumerate(original_predictions):
+        for image_ind, image_predictions in enumerate(original_predictions):
             shift_amount = shift_amount_list[image_ind]
             full_shape = None if full_shape_list is None else full_shape_list[image_ind]
             
             # process predictions
-            for prediction in image_predictions_in_xyxy_format:
-                
+            for prediction in image_predictions:
                 x1 = int(prediction['l'])
                 y1 = int(prediction['t'])
                 x2 = int(prediction['r'])
