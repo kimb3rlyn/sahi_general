@@ -128,7 +128,7 @@ class SahiGeneral(DetectionModel):
         # Non-SAHI detection
         detection_results = self.model.get_detections_dict(list_of_non_sahi_imgs, classes=classes)
         if detection_results is None:
-            detection_results = [[]]
+            detection_results = [[]] * len(list_of_non_sahi_imgs)
 
         # merge sahi det results with original list result
         exit_counter = 0
@@ -137,10 +137,10 @@ class SahiGeneral(DetectionModel):
             for sahi_slice_result in list_sahi_detection_results[i]:
                 if len(sahi_slice_result) > 0:
                     for obj_det in sahi_slice_result:
-                        l = obj_det.bbox.minx
-                        t = obj_det.bbox.miny
-                        r = obj_det.bbox.maxx
-                        b = obj_det.bbox.maxy
+                        l = int(obj_det.bbox.minx)
+                        t = int(obj_det.bbox.miny)
+                        r = int(obj_det.bbox.maxx)
+                        b = int(obj_det.bbox.maxy)
                         w = r - l
                         h = b - t
                         score = obj_det.score.value
@@ -152,7 +152,6 @@ class SahiGeneral(DetectionModel):
 
     @torch.no_grad()
     def _detect_sahi(self, img, classes):
-
         slice_image_result = slice_image(
             image=img,
             slice_height=self.sahi_slice_height,
@@ -257,5 +256,5 @@ class SahiGeneral(DetectionModel):
 
         # combine predictions
         object_prediction_list = postprocess(object_prediction_list)
-        
+
         return [object_prediction_list]
