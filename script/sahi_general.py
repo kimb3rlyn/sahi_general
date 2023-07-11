@@ -117,7 +117,6 @@ class SahiGeneral(DetectionModel):
         all_detections = self.model.get_detections_dict(all_images, classes=classes)
         if all_detections is None:
             all_detections = [[]] * len(all_images)
-        # non_sahi_detection_results = [det for idx, det in enumerate(all_detections) if idx not in list_of_sahi_idx]
 
         # batch up SAHI detection
         sahi_predictions, all_shift_amount, all_full_shape = self._sahi_detection_batch(list_of_sahi_imgs, classes)
