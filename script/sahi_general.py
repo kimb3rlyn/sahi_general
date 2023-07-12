@@ -1,6 +1,7 @@
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from itertools import islice
 from typing import List, Tuple
 
 import torch
@@ -21,8 +22,8 @@ DetectionType = Tuple[BoundingBoxType, float, str]
 
 class DetectionModel(ABC):
     @abstractmethod
-    def detect(self, list_of_imgs: List[np.ndarray]) -> List[List[DetectionType]]:
-        """Performs detections. This method should call self._preprocess() and self._postprocess()"""
+    def detect(self, all_images: List[np.ndarray], classes: List[str] = None) -> List[List[DetectionType]]:
+        """Performs detections."""
         raise NotImplementedError
 
 @dataclass
@@ -93,10 +94,10 @@ class SahiGeneral(DetectionModel):
 
         self.sahi_postprocess_type = self.sahi_postprocess_type.upper()
 
-        print('SAHI detection warmed up')
+        logger.info('SahiGeneral warmed up')
 
     @torch.no_grad()
-    def detect(self, list_of_imgs: List[np.ndarray], classes=None) -> List[List[DetectionType]]:
+    def detect(self, all_images: List[np.ndarray], classes: List[str] = None) -> List[List[DetectionType]]:
         """
         Args:
             list of images (np.ndarray): an image of shape (H, W, C) (in BGR order).
@@ -104,157 +105,138 @@ class SahiGeneral(DetectionModel):
         Returns:
             predictions (dict): the output of the model
         """
-        # split image into 2 array, 1 for sahi and 1 for batch
-        # another array will be for store how to merge them back
-        list_of_non_sahi_imgs = []
+        # Images that are below the threshold will be ignored for SAHI and undergo normal detection
         list_of_sahi_imgs = []
         list_of_sahi_idx = []
-
-        # In the case of irregular image size, the images that are below the threshold will be ignore for SAHI and undergo normal detection
-        for i, img in enumerate(list_of_imgs):
+        for i, img in enumerate(all_images):
             if img.shape[0] > self.sahi_image_height_threshold or img.shape[1] > self.sahi_image_width_threshold:
                 list_of_sahi_imgs.append(img)
                 list_of_sahi_idx.append(i)
-            else:
-                list_of_non_sahi_imgs.append(img)
 
-        # SAHI detection
-        list_sahi_detection_results = []
-        for sahi_img in list_of_sahi_imgs:
-            # send to inference each of sahi images
-            sahi_detection_results = self._detect_sahi(sahi_img, classes)
-            list_sahi_detection_results.append(sahi_detection_results)
+        # All detections (SAHI and non-SAHI)
+        all_detections = self.model.get_detections_dict(all_images, classes=classes)
+        if all_detections is None:
+            all_detections = [[]] * len(all_images)
 
-        # Non-SAHI detection
-        detection_results = self.model.get_detections_dict(list_of_non_sahi_imgs, classes=classes)
-        if detection_results is None:
-            detection_results = [[]] * len(list_of_non_sahi_imgs)
+        # batch up SAHI detection
+        sahi_predictions, all_shift_amount, all_full_shape = self._sahi_detection_batch(list_of_sahi_imgs, classes)
 
-        # merge sahi det results with original list result
-        exit_counter = 0
+        # combine SAHI detections with full image detection
+        all_sahi_results = []
         for i, idx in enumerate(list_of_sahi_idx):
-            img_result_list = []
-            for sahi_slice_result in list_sahi_detection_results[i]:
-                if len(sahi_slice_result) > 0:
-                    for obj_det in sahi_slice_result:
-                        l = int(obj_det.bbox.minx)
-                        t = int(obj_det.bbox.miny)
-                        r = int(obj_det.bbox.maxx)
-                        b = int(obj_det.bbox.maxy)
-                        w = r - l
-                        h = b - t
-                        score = obj_det.score.value
-                        class_name = obj_det.category.name
-                        result = {'label': class_name, 'confidence': score, 't': t, 'l': l, 'b': b, 'r': r, 'w': w, 'h': h}
-                        img_result_list.append(result)
-            detection_results.insert(idx, img_result_list)
-        return detection_results
+            sahi_detection_results = self._detect_sahi(all_detections[idx], sahi_predictions[i], all_shift_amount[i], all_full_shape[i])
+            all_sahi_results.append(sahi_detection_results)
+
+        # convert detections from SAHI format to dictionary format
+        for i, idx in enumerate(list_of_sahi_idx):
+            img_result = []
+            for sahi_result in all_sahi_results[i]:
+                for obj_det in sahi_result:
+                    l = int(obj_det.bbox.minx)
+                    t = int(obj_det.bbox.miny)
+                    r = int(obj_det.bbox.maxx)
+                    b = int(obj_det.bbox.maxy)
+                    w = r - l
+                    h = b - t
+                    score = obj_det.score.value
+                    class_name = obj_det.category.name
+                    result = {'label': class_name, 'confidence': score, 't': t, 'l': l, 'b': b, 'r': r, 'w': w, 'h': h}
+                    img_result.append(result)
+            # replace result with the combination of both SAHI and non-SAHI detections
+            all_detections[idx] = img_result
+        return all_detections
 
     @torch.no_grad()
-    def _detect_sahi(self, img, classes):
-        slice_image_result = slice_image(
-            image=img,
-            slice_height=self.sahi_slice_height,
-            slice_width=self.sahi_slice_width,
-            overlap_height_ratio=self.sahi_overlap_height_ratio,
-            overlap_width_ratio=self.sahi_overlap_width_ratio
-        )
+    def _sahi_detection_batch(self, sahi_imgs, classes=None):
+        all_sahi_images = []
+        all_shift_amount_list = []
+        all_full_shape_list = []
+        for img in sahi_imgs:
+            slice_image_result = slice_image(
+                image=img,
+                slice_height=self.sahi_slice_height,
+                slice_width=self.sahi_slice_width,
+                overlap_height_ratio=self.sahi_overlap_height_ratio,
+                overlap_width_ratio=self.sahi_overlap_width_ratio
+            )
 
+            shift_amount_list = []
+            full_shape_list = []
+            for sliced_image in slice_image_result.sliced_image_list:
+                all_sahi_images.append(sliced_image.image)
+                shift_amount_list.append(sliced_image.starting_pixel)
+                full_shape_list.append([slice_image_result.original_image_height, slice_image_result.original_image_width])
+            all_shift_amount_list.append(fix_shift_amount_list(shift_amount_list))
+            all_full_shape_list.append(fix_full_shape_list(full_shape_list))
+            logger.debug(f'Number of sahi slices for 1 image: {len(shift_amount_list)}')
+
+        all_sahi_predictions = iter(self.model.get_detections_dict(all_sahi_images, classes=classes))
+        sahi_predictions = [list(islice(all_sahi_predictions, len(fs_list))) for fs_list in all_full_shape_list]
+        return sahi_predictions, all_shift_amount_list, all_full_shape_list
+
+    def _detect_sahi(self, non_sahi_predictions, sahi_predictions, shift_amount_list, full_shape_list):
+        object_prediction_list = []
+
+        # non-SAHI detections
+        for prediction in non_sahi_predictions:
+            object_prediction = self._convert_dict_to_sahi_format(prediction, [0, 0], None)
+            if object_prediction is not None:
+                object_prediction_list.append(object_prediction)
+
+        # SAHI detections
+        for idx, predictions in enumerate(sahi_predictions):
+            shift_amount = shift_amount_list[idx]
+            full_shape = None if full_shape_list is None else full_shape_list[idx]
+            
+            for prediction in predictions:
+                object_prediction = self._convert_dict_to_sahi_format(prediction, shift_amount, full_shape)
+                if object_prediction is not None:
+                    object_prediction_list.append(object_prediction.get_shifted_object_prediction())
+
+        # postprocess both SAHI and non-SAHI detections
+        return [self._postprocess(object_prediction_list)]
+
+    def _convert_dict_to_sahi_format(self, prediction, shift_amount, full_shape):
+        x1 = int(prediction['l'])
+        y1 = int(prediction['t'])
+        x2 = int(prediction['r'])
+        y2 = int(prediction['b'])
+        bbox = [x1, y1, x2, y2]
+        score = prediction['confidence']
+        category_name = prediction['label']
+
+        # fix negative box coords
+        bbox[0] = max(0, bbox[0])
+        bbox[1] = max(0, bbox[1])
+        bbox[2] = max(0, bbox[2])
+        bbox[3] = max(0, bbox[3])
+
+        # fix out of image box coords
+        if full_shape is not None:
+            bbox[0] = min(self.sahi_slice_width, bbox[0])
+            bbox[1] = min(self.sahi_slice_height, bbox[1])
+            bbox[2] = min(self.sahi_slice_width, bbox[2])
+            bbox[3] = min(self.sahi_slice_height, bbox[3])
+
+        # ignore invalid predictions
+        if not (bbox[0] < bbox[2]) or not (bbox[1] < bbox[3]):
+            logger.warning(f"ignoring invalid prediction with bbox: {bbox}")
+            return None
+        return ObjectPrediction(
+                bbox=bbox,
+                score=score,
+                category_id = self.model.classname_to_idx(category_name),
+                bool_mask=None,
+                category_name=category_name,
+                shift_amount=shift_amount,
+                full_shape=full_shape,
+            )
+
+    def _postprocess(self, object_prediction_list):
         postprocess_constructor = POSTPROCESS_NAME_TO_CLASS[self.sahi_postprocess_type]
         postprocess = postprocess_constructor(
             match_threshold=self.sahi_postprocess_match_threshold,
             match_metric=self.sahi_postprocess_match_metric,
             class_agnostic=self.sahi_postprocess_class_agnostic,
         )
-
-        # create prediction list
-        shift_amount_list = []
-        list_of_imgs = []
-        full_shape_list = []
-        for sliced_image in slice_image_result.sliced_image_list:
-            list_of_imgs.append(sliced_image.image)
-            shift_amount_list.append(sliced_image.starting_pixel)
-            full_shape_list.append(
-                [slice_image_result.original_image_height, slice_image_result.original_image_width])
-
-        original_detection_results = self.model.get_detections_dict([img], classes=classes)[0]
-
-        object_prediction_list = []
-        for prediction in original_detection_results:
-            x1 = int(prediction['l'])
-            y1 = int(prediction['t'])
-            x2 = int(prediction['r'])
-            y2 = int(prediction['b'])
-            bbox = [x1, y1, x2, y2]
-            score = prediction['confidence']
-            category_name = prediction['label']
-
-            # ignore invalid predictions
-            if not (bbox[0] < bbox[2]) or not (bbox[1] < bbox[3]):
-                logger.warning(
-                    f"ignoring invalid prediction with bbox: {bbox}")
-                continue
-            object_prediction = ObjectPrediction(
-                bbox=bbox,
-                score=score,
-                category_id = self.model.classname_to_idx(category_name),
-                bool_mask=None,
-                category_name=category_name,
-                shift_amount=[0, 0],
-                full_shape=None,
-            )
-            object_prediction_list.append(object_prediction)
-
-        original_predictions = self.model.get_detections_dict(list_of_imgs, classes=classes)
-  
-        shift_amount_list = fix_shift_amount_list(shift_amount_list)
-        full_shape_list = fix_full_shape_list(full_shape_list)
-
-        for image_ind, image_predictions in enumerate(original_predictions):
-            shift_amount = shift_amount_list[image_ind]
-            full_shape = None if full_shape_list is None else full_shape_list[image_ind]
-            
-            # process predictions
-            for prediction in image_predictions:
-                x1 = int(prediction['l'])
-                y1 = int(prediction['t'])
-                x2 = int(prediction['r'])
-                y2 = int(prediction['b'])
-                bbox = [x1, y1, x2, y2]
-                score = prediction['confidence']
-                category_name = prediction['label']
-
-                # fix negative box coords
-                bbox[0] = max(0, bbox[0])
-                bbox[1] = max(0, bbox[1])
-                bbox[2] = max(0, bbox[2])
-                bbox[3] = max(0, bbox[3])
-
-                # fix out of image box coords
-                if full_shape is not None:
-                    bbox[0] = min(self.sahi_slice_width, bbox[0])
-                    bbox[1] = min(self.sahi_slice_height, bbox[1])
-                    bbox[2] = min(self.sahi_slice_width, bbox[2])
-                    bbox[3] = min(self.sahi_slice_height, bbox[3])
-
-                # ignore invalid predictions
-                if not (bbox[0] < bbox[2]) or not (bbox[1] < bbox[3]):
-                    logger.warning(
-                        f"ignoring invalid prediction with bbox: {bbox}")
-                    continue
-                object_prediction = ObjectPrediction(
-                    bbox=bbox,
-                    score=score,
-                    category_id = self.model.classname_to_idx(category_name),
-                    bool_mask=None,
-                    category_name=category_name,
-                    shift_amount=shift_amount,
-                    full_shape=full_shape,
-                )
-                object_prediction_list.append(
-                    object_prediction.get_shifted_object_prediction())
-
-        # combine predictions
-        object_prediction_list = postprocess(object_prediction_list)
-
-        return [object_prediction_list]
+        return postprocess(object_prediction_list)
