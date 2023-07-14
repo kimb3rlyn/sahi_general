@@ -64,6 +64,9 @@ class SahiGeneral(DetectionModel):
         sahi_postprocess_class_agnostic: bool
             If True, postprocess will ignore category ids.
             Defaulted to True
+        full_frame_detection: bool
+            If True, additional detection will be done on the full frame.
+            Defaulted to True
     """
     model: object = None
     sahi_image_height_threshold: int = 900
@@ -76,6 +79,7 @@ class SahiGeneral(DetectionModel):
     sahi_postprocess_match_metric: str = "IOS"
     sahi_postprocess_match_threshold: float = 0.5
     sahi_postprocess_class_agnostic: bool = True
+    full_frame_detection: bool = True
 
     def __post_init__(self):
         assert (
@@ -106,17 +110,26 @@ class SahiGeneral(DetectionModel):
             predictions (dict): the output of the model
         """
         # Images that are below the threshold will be ignored for SAHI and undergo normal detection
+        list_of_non_sahi_imgs = []
         list_of_sahi_imgs = []
         list_of_sahi_idx = []
         for i, img in enumerate(all_images):
             if img.shape[0] > self.sahi_image_height_threshold or img.shape[1] > self.sahi_image_width_threshold:
                 list_of_sahi_imgs.append(img)
                 list_of_sahi_idx.append(i)
+            else:
+                list_of_non_sahi_imgs.append(img)
 
-        # All detections (SAHI and non-SAHI)
-        all_detections = self.model.get_detections_dict(all_images, classes=classes)
+        if self.full_frame_detection:
+            # Do detections on both SAHI and non-SAHI images
+            images_to_detect = all_images
+        else:
+            # Do detection on full frame for only non-SAHI images
+            images_to_detect = list_of_non_sahi_imgs
+
+        all_detections = self.model.get_detections_dict(images_to_detect, classes=classes)
         if all_detections is None:
-            all_detections = [[]] * len(all_images)
+            all_detections = [[]] * len(images_to_detect)
 
         # batch up SAHI detection
         sahi_predictions, all_shift_amount, all_full_shape = self._sahi_detection_batch(list_of_sahi_imgs, classes)
@@ -124,7 +137,11 @@ class SahiGeneral(DetectionModel):
         # combine SAHI detections with full image detection
         all_sahi_results = []
         for i, idx in enumerate(list_of_sahi_idx):
-            sahi_detection_results = self._detect_sahi(all_detections[idx], sahi_predictions[i], all_shift_amount[i], all_full_shape[i])
+            if self.full_frame_detection:
+                full_frame_predictions = all_detections[idx]
+            else:
+                full_frame_predictions = []
+            sahi_detection_results = self._detect_sahi(full_frame_predictions, sahi_predictions[i], all_shift_amount[i], all_full_shape[i])
             all_sahi_results.append(sahi_detection_results)
 
         # convert detections from SAHI format to dictionary format
@@ -142,8 +159,12 @@ class SahiGeneral(DetectionModel):
                     class_name = obj_det.category.name
                     result = {'label': class_name, 'confidence': score, 't': t, 'l': l, 'b': b, 'r': r, 'w': w, 'h': h}
                     img_result.append(result)
-            # replace result with the combination of both SAHI and non-SAHI detections
-            all_detections[idx] = img_result
+            if self.full_frame_detection:
+                # replace result with the combination of both SAHI and non-SAHI detections
+                all_detections[idx] = img_result
+            else:
+                # insert SAHI detections into the correct idx
+                all_detections.insert(idx, img_result)
         return all_detections
 
     @torch.no_grad()
@@ -187,7 +208,7 @@ class SahiGeneral(DetectionModel):
         for idx, predictions in enumerate(sahi_predictions):
             shift_amount = shift_amount_list[idx]
             full_shape = None if full_shape_list is None else full_shape_list[idx]
-            
+
             for prediction in predictions:
                 object_prediction = self._convert_dict_to_sahi_format(prediction, shift_amount, full_shape)
                 if object_prediction is not None:
