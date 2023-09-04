@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from itertools import islice
 from typing import List, Tuple
+from typing_extensions import TypedDict
 
 import torch
 import numpy as np
@@ -14,11 +15,8 @@ from sahi.utils.compatibility import fix_full_shape_list, fix_shift_amount_list
 
 logger = logging.getLogger(__name__)
 
-"""Bounding box LTRB values"""
-BoundingBoxType = Tuple[float, float, float, float]
-
-"""Detection: Tuple[LTRB bounding box, Detection confidence, Detection class name]"""
-DetectionType = Tuple[BoundingBoxType, float, str]
+"""Detection: Dict[Detection class name, Detection confidence, LTRBWH bounding box]"""
+DetectionType = TypedDict('Detection', {'label': str, 'confidence': float, 'l': int, 't': int, 'r': int, 'b': int, 'w': int, 'h': int})
 
 class DetectionModel(ABC):
     @abstractmethod
@@ -191,7 +189,11 @@ class SahiGeneral(DetectionModel):
             all_full_shape_list.append(fix_full_shape_list(full_shape_list))
             logger.debug(f'Number of sahi slices for 1 image: {len(shift_amount_list)}')
 
-        all_sahi_predictions = iter(self.model.get_detections_dict(all_sahi_images, classes=classes))
+        all_detections = self.model.get_detections_dict(all_sahi_images, classes=classes)
+        if all_detections is not None:
+            all_sahi_predictions = iter(all_detections)
+        else:
+            all_sahi_predictions = [[]] * len(all_sahi_images)
         sahi_predictions = [list(islice(all_sahi_predictions, len(fs_list))) for fs_list in all_full_shape_list]
         return sahi_predictions, all_shift_amount_list, all_full_shape_list
 
@@ -254,10 +256,15 @@ class SahiGeneral(DetectionModel):
             )
 
     def _postprocess(self, object_prediction_list):
-        postprocess_constructor = POSTPROCESS_NAME_TO_CLASS[self.sahi_postprocess_type]
-        postprocess = postprocess_constructor(
-            match_threshold=self.sahi_postprocess_match_threshold,
-            match_metric=self.sahi_postprocess_match_metric,
-            class_agnostic=self.sahi_postprocess_class_agnostic,
-        )
-        return postprocess(object_prediction_list)
+        if len(object_prediction_list) == 1:
+            return object_prediction_list
+        elif object_prediction_list:
+            postprocess_constructor = POSTPROCESS_NAME_TO_CLASS[self.sahi_postprocess_type]
+            postprocess = postprocess_constructor(
+                match_threshold=self.sahi_postprocess_match_threshold,
+                match_metric=self.sahi_postprocess_match_metric,
+                class_agnostic=self.sahi_postprocess_class_agnostic,
+            )
+            return postprocess(object_prediction_list)
+        else:
+            return []
