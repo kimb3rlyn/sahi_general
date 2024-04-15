@@ -33,6 +33,19 @@
         List[dict]
             list of detections for each frame with keys: label, confidence, t, l, b, r, w, h
             
+## Using sahi_general as a package for inference
 
-## Usage 
-- Refer to ```sahi_general_test.py``` for example usage 
+- Clone this repository
+- Make sure the requirements above are installed
+- in the main project folder, install sahi_general as a package
+```
+python3 -m pip install --no-cache-dir /path/to/sahi_general
+```
+OR as an editable package (if you need to make changes to the code, faster to build)
+```
+python3 -m pip install -e /path/to/sahi_general
+```
+- import the sahi_general wrapper class for inference (refer to ```sahi_general_test.py``` for example usage )
+```
+from script.sahi_general import SahiGeneral
+```
