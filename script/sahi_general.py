@@ -249,7 +249,6 @@ class SahiGeneral(DetectionModel):
                 bbox=bbox,
                 score=score,
                 category_id = self.model.classname_to_idx(category_name),
-                bool_mask=None,
                 category_name=category_name,
                 shift_amount=shift_amount,
                 full_shape=full_shape,
