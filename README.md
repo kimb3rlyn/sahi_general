@@ -1,7 +1,7 @@
 # SAHI General
 
 
-## Requirements 
+## Requirements
 - SAHI :  0.10.5 <br>
   ``` pip install sahi ```
 - CV Model : requires the below functions  
@@ -47,5 +47,5 @@ python3 -m pip install -e /path/to/sahi_general
 ```
 - import the sahi_general wrapper class for inference (refer to ```sahi_general_test.py``` for example usage )
 ```
-from script.sahi_general import SahiGeneral
+from sahi_general.sahi_general import SahiGeneral
 ```
